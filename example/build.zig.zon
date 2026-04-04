@@ -1,0 +1,15 @@
+.{
+    .name = .example,
+    .fingerprint = 0x6eec9b9f0edf1935,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .appicon = .{ .path = ".." },
+        .win32 = .{
+            .url = "git+https://github.com/marlersoft/zigwin32#fd6ebce3ebfe48f291069c0ddc518b2cc83be450",
+            .hash = "zigwin32-25.0.28-preview-AAAAALYs5QNcI6U4YMngK-zET_wKAM10AWdbIcWEUaYV",
+            .lazy = true,
+        },
+    },
+    .paths = .{""},
+}
