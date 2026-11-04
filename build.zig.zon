@@ -2,16 +2,12 @@
     .name = .appicon,
     .fingerprint = 0x68d83e656416943,
     .version = "0.0.1",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.17.0",
+    .zig_version = "0.17.1",
     .dependencies = .{
-        // std.compress.flate is stubbed out in zig 0.15; zipcmdline provides a working flate compressor
-        .zipcmdline = .{
-            .url = "git+https://github.com/marler8997/zipcmdline#a8807944231b46565450504cb7f3146e29e51335",
-            .hash = "zipcmdline-0.0.0-DFii09hmAwAK1TuCE9eIMZANDZRJnodAHOUOCM8pAPO3",
-        },
         .x11 = .{
-            .url = "git+https://github.com/marler8997/zigx#602f3c06c44378aac81cf52f24a5e253db4d2bb0",
-            .hash = "x11-0.0.0-yWuw5jfGDQAlrwtRDjMJyOJ5pLuLrNs79dFYgXhPrZuF",
+            .url = "git+https://github.com/marler8997/zigx#c36c804e6173395d392065381e82546a64725e33",
+            .hash = "x11-0.0.0-yWuw5iqHDQAmD5CzPx3k0ECPqO29nV_yz3rm7PEElEcS",
             .lazy = true,
         },
     },

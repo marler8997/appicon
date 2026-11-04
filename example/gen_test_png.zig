@@ -1,14 +1,13 @@
 /// Generates minimal RGBA PNGs at specified sizes for testing.
 /// Usage: gen_test_png <size> <output.png> [<size> <output.png>] ...
 const std = @import("std");
-const flate = @import("backportflate").compress.flate;
+const flate = std.compress.flate;
 
-pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const arena = init.arena.allocator();
 
-    const args = try std.process.argsAlloc(arena);
+    const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3 or (args.len - 1) % 2 != 0) {
         std.log.err("usage: gen_test_png <size> <output.png> [<size> <output.png>] ...", .{});
         std.process.exit(1);
@@ -31,15 +30,15 @@ pub fn main() !void {
                 error.WriteFailed => return error.OutOfMemory,
             };
             writeCompressedPixels(&compressor.writer, size) catch return error.OutOfMemory;
-            compressor.writer.flush() catch return error.OutOfMemory;
+            compressor.finish() catch return error.OutOfMemory;
             break :blk try a.toOwnedSlice();
         };
         defer arena.free(idat);
 
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
         var buf: [4096]u8 = undefined;
-        var file_writer = file.writer(&buf);
+        var file_writer = file.writer(io, &buf);
         writePngChunks(&file_writer.interface, size, idat) catch return file_writer.err.?;
     }
 }

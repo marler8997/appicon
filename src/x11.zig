@@ -32,13 +32,13 @@ fn setWmIcon(
     const msg_len: u32 = 6 + num_u32s;
     var offset: usize = 0;
     try x11.writeAll(sink.writer, &offset, &[_]u8{
-        @intFromEnum(x11.Opcode.change_property),
-        @intFromEnum(mode),
+        @backingInt(x11.Opcode.change_property),
+        @backingInt(mode),
     });
     try x11.writeInt(sink.writer, &offset, u16, @intCast(msg_len));
-    try x11.writeInt(sink.writer, &offset, u32, @intFromEnum(window));
-    try x11.writeInt(sink.writer, &offset, u32, @intFromEnum(icon_atom));
-    try x11.writeInt(sink.writer, &offset, u32, @intFromEnum(x11.Atom.CARDINAL));
+    try x11.writeInt(sink.writer, &offset, u32, @backingInt(window));
+    try x11.writeInt(sink.writer, &offset, u32, @backingInt(icon_atom));
+    try x11.writeInt(sink.writer, &offset, u32, @backingInt(x11.Atom.CARDINAL));
     try x11.writeAll(sink.writer, &offset, &[_]u8{ 32, 0, 0, 0 });
     try x11.writeInt(sink.writer, &offset, u32, num_u32s);
     // width, height

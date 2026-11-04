@@ -10,12 +10,6 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("gen_test_png.zig"),
             .target = b.graph.host,
-            .imports = &.{
-                .{
-                    .name = "backportflate",
-                    .module = appicon_dep.builder.dependency("zipcmdline", .{}).module("backportflate"),
-                },
-            },
         }),
     });
     const gen_png = b.addRunArtifact(gen_png_exe);
@@ -72,7 +66,7 @@ pub fn build(b: *std.Build) void {
             .{ .source = png48, .sizes = &.{48}, .enforce_size = 48 },
             .{ .source = png128, .sizes = &.{128}, .enforce_size = 128 },
         });
-        exe.addWin32ResourceFile(.{
+        exe.root_module.addWin32ResourceFile(.{
             .file = b.path("win32/appicon-example.rc"),
             .include_paths = &.{ico.dirname()},
         });
@@ -83,6 +77,6 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(&install.step);
-    if (b.args) |a| run.addArgs(a);
+    run.addPassthruArgs();
     b.step("run", "").dependOn(&run.step);
 }

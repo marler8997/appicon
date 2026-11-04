@@ -27,7 +27,7 @@ exe.root_module.addImport("myicon", myicon);
 const ico = appicon.createWindowsIco(b, appicon_dep, "myapp.ico", &.{
     .{ .source = b.path("img/icon256.png"), .sizes = &.{ 16, 32, 48, 128 } },
 });
-exe.addWin32ResourceFile(.{
+exe.root_module.addWin32ResourceFile(.{
     .file = b.path("src/myapp.rc"),
     .include_paths = &.{ico.dirname()},
 });
@@ -48,7 +48,7 @@ const config: myicon.Config = .{
 };
 
 // Install desktop files and icons
-try myicon.installDesktop(config);
+try myicon.installDesktop(io, environ, config);
 
 // Send icons to X server
 try myicon.setWmIcons(&sink, window, net_wm_icon_atom);

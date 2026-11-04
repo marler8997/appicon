@@ -6,12 +6,6 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/icon_gen.zig"),
             .target = b.graph.host,
-            .imports = &.{
-                .{
-                    .name = "backportflate",
-                    .module = b.dependency("zipcmdline", .{}).module("backportflate"),
-                },
-            },
         }),
     });
     b.installArtifact(icon_gen_exe);
