@@ -1,0 +1,28 @@
+name: Test
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, windows-11-arm]
+      fail-fast: false
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: marler8997/setup-anyzig@master
+      - run: zig build --summary all
+      # building the example generates its icons with icon_gen; running it needs a display
+      - run: zig build --summary all
+        working-directory: example
+      - run: zig build -Dtarget=x86_64-linux --summary all
+        working-directory: example
+      - run: zig build -Dtarget=aarch64-linux --summary all
+        working-directory: example
+      - run: zig build -Dtarget=x86_64-windows --summary all
+        working-directory: example
+      - run: zig build -Dtarget=aarch64-windows --summary all
+        working-directory: example
