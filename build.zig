@@ -9,6 +9,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(icon_gen_exe);
+
+    // only when building appicon itself, so consumers don't load the x11 dependency
+    if (b.isRoot()) {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = b.graph.host,
+        });
+        if (b.lazyDependency("x11", .{})) |dep| test_mod.addImport("x11", dep.module("x11"));
+        const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = test_mod }));
+        b.step("test", "Run unit tests").dependOn(&run_tests.step);
+    }
 }
 
 pub const ModuleOptions = struct {

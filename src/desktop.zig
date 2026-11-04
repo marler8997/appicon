@@ -90,15 +90,23 @@ fn installFile(io: std.Io, path: []const u8, content: ContentIterator) !bool {
         .outdated => .outdated,
     };
 
-    const dir_path = std.fs.path.dirname(path) orelse return false;
-    try std.Io.Dir.cwd().createDirPath(io, dir_path);
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer file.close(io);
-
-    var iter = content;
-    while (iter.next()) |chunk| {
-        try file.writeStreamingAll(io, chunk);
+    // Write a temporary file and rename it so an interrupted install never leaves a
+    // partial file. The fixed name means the next install overwrites any leftover.
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "{s}.tmp", .{path}) catch
+        return error.DataHomePathTooLong;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, std.fs.path.dirname(path) orelse ".");
+    const file = try cwd.createFile(io, tmp_path, .{});
+    errdefer cwd.deleteFile(io, tmp_path) catch {};
+    {
+        defer file.close(io);
+        var iter = content;
+        while (iter.next()) |chunk| {
+            try file.writeStreamingAll(io, chunk);
+        }
     }
+    try cwd.rename(tmp_path, cwd, path, io);
     std.log.info("{s}: {s}", .{
         path,
         switch (changed) {
@@ -232,3 +240,27 @@ const PngIterator = struct {
 
 const std = @import("std");
 const appicon = @import("appicon.zig");
+
+test "PngIterator output decodes to the original pixels" {
+    const icon_gen = @import("icon_gen.zig");
+    const allocator = std.testing.allocator;
+    const size = 5;
+    var pixels: [size * size][4]u8 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = .{ @intCast(i * 10), @intCast(255 - i), @intCast(i * 3), @intCast(i * 7) };
+
+    var zlib: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
+    defer zlib.deinit();
+    try icon_gen.writeIdatZlib(&zlib.writer, .{ .width = size, .height = size, .pixels = &pixels }, size);
+
+    var png: std.ArrayList(u8) = .empty;
+    defer png.deinit(allocator);
+    var iter: ContentIterator = .{ .png = PngIterator.init(size, zlib.written()) };
+    while (iter.next()) |chunk| try png.appendSlice(allocator, chunk);
+
+    // decodePng checks the signature, the chunk CRCs and IHDR
+    const decoded = try icon_gen.decodePng(allocator, png.items);
+    defer allocator.free(decoded.pixels);
+    try std.testing.expectEqual(size, decoded.width);
+    try std.testing.expectEqual(size, decoded.height);
+    try std.testing.expectEqualSlices([4]u8, &pixels, decoded.pixels);
+}

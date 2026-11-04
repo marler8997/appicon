@@ -2,7 +2,7 @@
 
 Takes PNG files of your app icon at build time and repackages them for your native app.
 
-Supports unique PNG files for each size or, can take any PNG and scale it at build time using a box filter.
+Supports unique PNG files for each size or, can take any PNG and scale it at build time using a box filter. Source PNGs must be 8-bit RGBA and non-interlaced.
 
 On Windows, it generates a ".ico" file that should be embedded into your app as a resource (see example).
 
