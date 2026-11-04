@@ -31,10 +31,15 @@ pub fn makeDesktopFile(comptime config: appicon.Config) [:0]const u8 {
         (if (e.StartupNotify) |v| "StartupNotify=" ++ (if (v) "true" else "false") ++ "\n" else "");
 }
 
-pub fn install(comptime config: appicon.Config, icons: []const appicon.Icon) !void {
+pub fn install(
+    io: std.Io,
+    environ: std.process.Environ,
+    comptime config: appicon.Config,
+    icons: []const appicon.Icon,
+) !void {
     var data_home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const data_home = std.posix.getenv("XDG_DATA_HOME") orelse blk: {
-        const home = std.posix.getenv("HOME") orelse {
+    const data_home = environ.getPosix("XDG_DATA_HOME") orelse blk: {
+        const home = environ.getPosix("HOME") orelse {
             std.log.warn("can't install desktop files, no $HOME or $XDG_DATA_HOME environment variable", .{});
             return;
         };
@@ -47,7 +52,7 @@ pub fn install(comptime config: appicon.Config, icons: []const appicon.Icon) !vo
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/icons/hicolor/{}x{}/apps/{s}.png", .{ data_home, entry.size, entry.size, config.id }) catch
             return error.DataHomePathTooLong;
-        if (try installFile(path, .{ .png = PngIterator.init(entry.size, entry.idat_zlib) }))
+        if (try installFile(io, path, .{ .png = PngIterator.init(entry.size, entry.idat_zlib) }))
             icons_changed = true;
     }
 
@@ -59,24 +64,24 @@ pub fn install(comptime config: appicon.Config, icons: []const appicon.Icon) !vo
     ) catch return error.DataHomePathTooLong;
 
     const desktop_file_content = makeDesktopFile(config);
-    const desktop_changed = try installFile(desktop_path, .{ .slice = desktop_file_content });
+    const desktop_changed = try installFile(io, desktop_path, .{ .slice = desktop_file_content });
 
     if (icons_changed) {
         var icon_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const icon_dir = std.fmt.bufPrint(&icon_dir_buf, "{s}/icons/hicolor", .{data_home}) catch
             return error.DataHomePathTooLong;
-        runCacheUpdate("gtk-update-icon-cache", icon_dir);
+        runCacheUpdate(io, "gtk-update-icon-cache", icon_dir);
     }
     if (desktop_changed) {
         var apps_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const apps_dir = std.fmt.bufPrint(&apps_dir_buf, "{s}/applications", .{data_home}) catch
             return error.DataHomePathTooLong;
-        runCacheUpdate("update-desktop-database", apps_dir);
+        runCacheUpdate(io, "update-desktop-database", apps_dir);
     }
 }
 
-fn installFile(path: []const u8, content: ContentIterator) !bool {
-    const changed: FileChanged = switch (try fileStatus(path, content)) {
+fn installFile(io: std.Io, path: []const u8, content: ContentIterator) !bool {
+    const changed: FileChanged = switch (try fileStatus(io, path, content)) {
         .up_to_date => {
             std.log.info("{s}: already installed", .{path});
             return false;
@@ -86,13 +91,13 @@ fn installFile(path: []const u8, content: ContentIterator) !bool {
     };
 
     const dir_path = std.fs.path.dirname(path) orelse return false;
-    try std.fs.cwd().makePath(dir_path);
-    var file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
+    try std.Io.Dir.cwd().createDirPath(io, dir_path);
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
 
     var iter = content;
     while (iter.next()) |chunk| {
-        try file.writeAll(chunk);
+        try file.writeStreamingAll(io, chunk);
     }
     std.log.info("{s}: {s}", .{
         path,
@@ -107,38 +112,39 @@ fn installFile(path: []const u8, content: ContentIterator) !bool {
 const FileChanged = enum { not_found, outdated };
 const FileStatus = enum { not_found, outdated, up_to_date };
 
-fn fileStatus(path: []const u8, content: ContentIterator) !FileStatus {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+fn fileStatus(io: std.Io, path: []const u8, content: ContentIterator) !FileStatus {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .not_found,
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
     var iter = content;
     var read_buf: [4096]u8 = undefined;
-    var read_pos: usize = 0;
-    var read_len: usize = 0;
+    var file_reader = file.reader(io, &read_buf);
+    const reader = &file_reader.interface;
 
     while (iter.next()) |expected_chunk| {
         var chunk_pos: usize = 0;
         while (chunk_pos < expected_chunk.len) {
-            if (read_pos >= read_len) {
-                read_len = try file.read(&read_buf);
-                read_pos = 0;
-                if (read_len == 0) return .outdated;
-            }
-            const avail = @min(read_len - read_pos, expected_chunk.len - chunk_pos);
-            if (!std.mem.eql(u8, read_buf[read_pos..][0..avail], expected_chunk[chunk_pos..][0..avail]))
+            const actual = reader.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => return .outdated,
+                error.ReadFailed => return file_reader.err.?,
+            };
+            const avail = @min(actual.len, expected_chunk.len - chunk_pos);
+            if (!std.mem.eql(u8, actual[0..avail], expected_chunk[chunk_pos..][0..avail]))
                 return .outdated;
-            read_pos += avail;
+            reader.toss(avail);
             chunk_pos += avail;
         }
     }
 
     // Check file has no extra bytes
-    if (read_pos < read_len) return .outdated;
-    const trailing = try file.read(&read_buf);
-    return if (trailing == 0) .up_to_date else .outdated;
+    _ = reader.peekByte() catch |err| switch (err) {
+        error.EndOfStream => return .up_to_date,
+        error.ReadFailed => return file_reader.err.?,
+    };
+    return .outdated;
 }
 
 const ContentIterator = union(enum) {
@@ -157,23 +163,19 @@ const ContentIterator = union(enum) {
     }
 };
 
-fn runCacheUpdate(cmd: []const u8, dir: []const u8) void {
-    var child = std.process.Child.init(&.{ cmd, dir }, std.heap.page_allocator);
-    const term = child.spawnAndWait() catch |err| {
+fn runCacheUpdate(io: std.Io, cmd: []const u8, dir: []const u8) void {
+    var child = std.process.spawn(io, .{ .argv = &.{ cmd, dir } }) catch |err| {
         std.log.warn("failed to run {s}: {}", .{ cmd, err });
         return;
     };
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0) {
-                std.log.info("{s}: success", .{cmd});
-            } else {
-                std.log.warn("{s}: exited with code {}", .{ cmd, code });
-            }
-        },
-        inline else => |sig, tag| {
-            std.log.warn("{s}: {s} signal {}", .{ cmd, @tagName(tag), sig });
-        },
+    const term = child.wait(io) catch |err| {
+        std.log.warn("failed to wait for {s}: {}", .{ cmd, err });
+        return;
+    };
+    if (term.success()) {
+        std.log.info("{s}: success", .{cmd});
+    } else {
+        std.log.warn("{s}: {f}", .{ cmd, term });
     }
 }
 

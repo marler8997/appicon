@@ -12,8 +12,8 @@ pub fn main() !void {
             &dpi.x,
             &dpi.y,
         );
-        if (hr < 0) {
-            std.log.warn("GetDpiForMonitor failed, hresult=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (hr.failed) {
+            std.log.warn("GetDpiForMonitor failed, hresult={f}", .{hr});
             break :blk .{ .x = 96, .y = 96 };
         }
         std.log.debug("primary monitor dpi {}x{}", .{ dpi.x, dpi.y });
@@ -61,7 +61,7 @@ pub fn main() !void {
     ) orelse win32.panicWin32("CreateWindow", win32.GetLastError());
 
     if (0 == win32.UpdateWindow(hwnd)) win32.panicWin32("UpdateWindow", win32.GetLastError());
-    _ = win32.ShowWindow(hwnd, .{ .SHOWNORMAL = 1 });
+    _ = win32.ShowWindow(hwnd, .SHOWNORMAL);
 
     // try some things to bring our window to the top
     const HWND_TOP: ?win32.HWND = null;
@@ -108,10 +108,10 @@ const Icons = struct {
 };
 
 fn getIcons(dpi: XY(u32)) Icons {
-    const small_x = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CXSMICON), dpi.x);
-    const small_y = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CYSMICON), dpi.y);
-    const large_x = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CXICON), dpi.x);
-    const large_y = win32.GetSystemMetricsForDpi(@intFromEnum(win32.SM_CYICON), dpi.y);
+    const small_x = win32.GetSystemMetricsForDpi(win32.SM_CXSMICON, dpi.x);
+    const small_y = win32.GetSystemMetricsForDpi(win32.SM_CYSMICON, dpi.y);
+    const large_x = win32.GetSystemMetricsForDpi(win32.SM_CXICON, dpi.x);
+    const large_y = win32.GetSystemMetricsForDpi(win32.SM_CYICON, dpi.y);
     std.log.debug("icons small={}x{} large={}x{} at dpi {}x{}", .{
         small_x, small_y,
         large_x, large_y,

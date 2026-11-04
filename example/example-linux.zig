@@ -16,30 +16,32 @@ const config: exampleicon.Config = .{
     },
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const environ = init.minimal.environ;
 
     // GNOME matches windows to .desktop files via StartupWMClass, but only if it
     // can find the Exec binary in PATH. Ensure we're symlinked there so the icon
     // shows up in the taskbar. Real apps would handle this via their installer.
-    try ensureSelfExeInPath(config.desktop_entry.Exec);
+    try ensureSelfExeInPath(io, environ, config.desktop_entry.Exec);
 
-    exampleicon.installDesktop(config) catch |err| {
+    exampleicon.installDesktop(io, environ, config) catch |err| {
         std.debug.print("failed to install desktop files: {}\n", .{err});
     };
 
-    const stream: std.net.Stream, const ids: Ids, const root: Root = blk: {
+    const stream: std.Io.net.Stream, const ids: Ids, const root: Root = blk: {
         var read_buffer: [1000]u8 = undefined;
-        var socket_reader, const used_auth = try x11.draft.connect(&read_buffer);
-        errdefer x11.disconnect(socket_reader.getStream());
+        var socket_reader, const used_auth = try x11.draft.connect(io, environ, &read_buffer);
+        errdefer x11.disconnect(io, socket_reader.stream);
         _ = used_auth;
-        const setup = x11.readSetupSuccess(socket_reader.interface()) catch |err| switch (err) {
-            error.ReadFailed => return socket_reader.getError().?,
+        const setup = x11.readSetupSuccess(&socket_reader.interface) catch |err| switch (err) {
+            error.ReadFailed => return socket_reader.err.?,
             error.EndOfStream, error.Protocol => |e| return e,
         };
         std.log.info("setup reply {f}", .{setup});
-        var source: x11.Source = .initFinishSetup(socket_reader.interface(), &setup);
+        var source: x11.Source = .initFinishSetup(&socket_reader.interface, &setup);
         const screen = (x11.draft.readSetupDynamic(&source, &setup, .{}) catch |err| switch (err) {
-            error.ReadFailed => return socket_reader.getError().?,
+            error.ReadFailed => return socket_reader.err.?,
             error.EndOfStream, error.Protocol => |e| return e,
         }) orelse {
             std.log.err("no screen?", .{});
@@ -51,7 +53,8 @@ pub fn main() !void {
             std.process.exit(0xff);
         }
         break :blk .{
-            socket_reader.getStream(), .{ .range = id_range }, .{
+            socket_reader.stream, .{ .range = id_range },
+            .{
                 .window = screen.root,
                 .visual = screen.root_visual,
                 .depth = x11.Depth.init(screen.root_depth) orelse std.debug.panic(
@@ -61,17 +64,17 @@ pub fn main() !void {
             },
         };
     };
-    defer x11.disconnect(stream);
+    defer x11.disconnect(io, stream);
 
     var write_buffer: [1000]u8 = undefined;
     var read_buffer: [1000]u8 = undefined;
-    var socket_writer = x11.socketWriter(stream, &write_buffer);
-    var socket_reader = x11.socketReader(stream, &read_buffer);
+    var socket_writer = stream.writer(io, &write_buffer);
+    var socket_reader = stream.reader(io, &read_buffer);
     var sink: x11.RequestSink = .{ .writer = &socket_writer.interface };
-    var source: x11.Source = .initAfterSetup(socket_reader.interface());
+    var source: x11.Source = .initAfterSetup(&socket_reader.interface);
     run(ids, &root, &sink, &source) catch |err| switch (err) {
         error.WriteFailed => |e| return x11.onWriteError(e, socket_writer.err.?),
-        error.ReadFailed, error.EndOfStream, error.Protocol => |e| return source.onReadError(e, socket_reader.getError()),
+        error.ReadFailed, error.EndOfStream, error.Protocol => |e| return source.onReadError(e, socket_reader.err),
         error.UnexpectedMessage => |e| return e,
     };
 }
@@ -161,23 +164,23 @@ const Ids = struct {
 
 /// Ensure the current binary is accessible via the given name in PATH.
 /// If not found or pointing to a different binary, symlinks it into a writable PATH directory.
-fn ensureSelfExeInPath(name: []const u8) !void {
+fn ensureSelfExeInPath(io: std.Io, environ: std.process.Environ, name: []const u8) !void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_path = std.fs.selfExePath(&exe_buf) catch |err| {
+    const exe_path = exe_buf[0 .. std.process.executablePath(io, &exe_buf) catch |err| {
         std.log.warn("can't get self exe path: {}", .{err});
         return;
-    };
-    if (isCurrentExeInPath(name, exe_path)) {
+    }];
+    const path_env = environ.getPosix("PATH") orelse "";
+    if (isCurrentExeInPath(io, path_env, name, exe_path)) {
         std.log.info("'{s}' already in PATH pointing to current exe", .{name});
         return;
     }
-    const path_env = std.posix.getenv("PATH") orelse "";
     var path_iter = std.mem.splitScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
-        switch (try symlink(exe_path, dir, name)) {
+        switch (try symlink(io, exe_path, dir, name)) {
             .access_denied => continue,
             .created => {
-                std.debug.assert(isCurrentExeInPath(name, exe_path));
+                std.debug.assert(isCurrentExeInPath(io, path_env, name, exe_path));
                 return;
             },
         }
@@ -186,32 +189,31 @@ fn ensureSelfExeInPath(name: []const u8) !void {
 }
 
 /// Check if name exists in PATH and is a symlink pointing to exe_path.
-fn isCurrentExeInPath(name: []const u8, exe_path: []const u8) bool {
-    const path_env = std.posix.getenv("PATH") orelse return false;
+fn isCurrentExeInPath(io: std.Io, path_env: []const u8, name: []const u8, exe_path: []const u8) bool {
     var path_iter = std.mem.splitScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
         var check_buf: [std.fs.max_path_bytes]u8 = undefined;
         const check_path = std.fmt.bufPrint(&check_buf, "{s}/{s}", .{ dir, name }) catch continue;
         var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const target = std.fs.cwd().readLink(check_path, &target_buf) catch continue;
+        const target = target_buf[0 .. std.Io.Dir.cwd().readLink(io, check_path, &target_buf) catch continue];
         if (std.mem.eql(u8, target, exe_path)) return true;
     }
     return false;
 }
 
-fn symlink(exe_path: []const u8, dir: []const u8, name: []const u8) !enum { created, access_denied } {
+fn symlink(io: std.Io, exe_path: []const u8, dir: []const u8, name: []const u8) !enum { created, access_denied } {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ dir, name });
 
     // Remove existing file/symlink if present
-    if (std.fs.cwd().deleteFile(link_path)) {
+    if (std.Io.Dir.cwd().deleteFile(io, link_path)) {
         std.log.info("deleted symlink '{s}'", .{link_path});
     } else |err| switch (err) {
         error.FileNotFound => {},
         error.AccessDenied => return .access_denied,
         else => |e| return reportErr(e, "delete '{s}' failed with {t}", .{ link_path, err }),
     }
-    std.posix.symlink(exe_path, link_path) catch |err| switch (err) {
+    std.Io.Dir.cwd().symLink(io, exe_path, link_path, .{}) catch |err| switch (err) {
         error.AccessDenied => return .access_denied,
         else => |e| return reportErr(
             e,

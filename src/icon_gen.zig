@@ -1,17 +1,16 @@
 const std = @import("std");
-const flate = @import("backportflate").compress.flate;
+const flate = std.compress.flate;
 
 const IconInput = struct {
     decoded: DecodedPng,
     target_size: u16,
 };
 
-pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const arena = init.arena.allocator();
 
-    const args = try std.process.argsAlloc(arena);
+    const args = try init.minimal.args.toSlice(arena);
     if (args.len < 4 or (args.len - 2) % 2 != 0) {
         printUsage();
         std.process.exit(1);
@@ -27,7 +26,7 @@ pub fn main() !void {
     };
 
     // Parse: [--enforce-size N] FILE.png SIZES [--enforce-size N] FILE.png SIZES ...
-    var inputs: std.ArrayListUnmanaged(IconInput) = .empty;
+    var inputs: std.ArrayList(IconInput) = .empty;
     var arg_idx: usize = 2;
     while (arg_idx < args.len) {
         var enforce_size: ?u16 = null;
@@ -53,7 +52,7 @@ pub fn main() !void {
         const sizes_str = args[arg_idx + 1];
         arg_idx += 2;
 
-        const png_data = std.fs.cwd().readFileAlloc(arena, path, 10 * 1024 * 1024) catch |err| {
+        const png_data = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(10 * 1024 * 1024)) catch |err| {
             std.log.err("failed to read '{s}': {}", .{ path, err });
             std.process.exit(1);
         };
@@ -86,12 +85,12 @@ pub fn main() !void {
     }
 
     switch (mode) {
-        .zig => try writeZigIcons(out_path, inputs.items),
+        .zig => try writeZigIcons(io, out_path, inputs.items),
         .ico => {
-            const file = try std.fs.cwd().createFile(out_path, .{});
-            defer file.close();
+            const file = try std.Io.Dir.cwd().createFile(io, out_path, .{});
+            defer file.close(io);
             var buf: [4096]u8 = undefined;
-            var file_writer = file.writer(&buf);
+            var file_writer = file.writer(io, &buf);
             writeIco(&file_writer.interface, inputs.items) catch return file_writer.err.?;
         },
     }
@@ -101,37 +100,38 @@ fn printUsage() void {
     std.log.err("usage: icon_gen <output.zig|output.ico> <file.png> <sizes> [<file.png> <sizes>] ...", .{});
 }
 
-fn writeZigIcons(out_path: []const u8, inputs: []const IconInput) !void {
+fn writeZigIcons(io: std.Io, out_path: []const u8, inputs: []const IconInput) !void {
     const out_dir_path = std.fs.path.dirname(out_path) orelse ".";
-    const out_dir = try std.fs.cwd().openDir(out_dir_path, .{});
+    const out_dir = try std.Io.Dir.cwd().openDir(io, out_dir_path, .{});
 
     for (inputs) |input| {
         var filename_buf: [32]u8 = undefined;
         const filename = std.fmt.bufPrint(&filename_buf, "icon_{}.zlib", .{input.target_size}) catch unreachable;
 
-        const idat_file = try out_dir.createFile(filename, .{});
-        defer idat_file.close();
+        const idat_file = try out_dir.createFile(io, filename, .{});
+        defer idat_file.close(io);
         var file_writer_buf: [4096]u8 = undefined;
-        var file_writer = idat_file.writer(&file_writer_buf);
+        var file_writer = idat_file.writer(io, &file_writer_buf);
 
         var compress_buf: [flate.max_window_len]u8 = undefined;
         var compressor = flate.Compress.init(&file_writer.interface, &compress_buf, .zlib, .best) catch |err| switch (err) {
             error.WriteFailed => return file_writer.err.?,
         };
         writeFilteredRows(&compressor.writer, input.decoded, input.target_size) catch return file_writer.err.?;
-        compressor.writer.flush() catch return file_writer.err.?;
+        compressor.finish() catch return file_writer.err.?;
         file_writer.interface.flush() catch return file_writer.err.?;
     }
 
-    const zig_file = try std.fs.cwd().createFile(out_path, .{});
-    defer zig_file.close();
+    const zig_file = try std.Io.Dir.cwd().createFile(io, out_path, .{});
+    defer zig_file.close(io);
     var zig_writer_buf: [4096]u8 = undefined;
-    var zig_writer = zig_file.writer(&zig_writer_buf);
+    var zig_writer = zig_file.writer(io, &zig_writer_buf);
     writeZig(&zig_writer.interface, inputs) catch return zig_writer.err.?;
 }
 
 fn writeZig(writer: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed}!void {
     try writer.writeAll(
+        \\const std = @import("std");
         \\const appicon = @import("appicon");
         \\pub const Config = appicon.Config;
         \\pub const entries = [_]appicon.Icon{
@@ -148,8 +148,8 @@ fn writeZig(writer: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed
     try writer.writeAll(
         \\};
         \\
-        \\pub fn installDesktop(comptime config: Config) !void {
-        \\    return appicon.desktop.install(config, &entries);
+        \\pub fn installDesktop(io: std.Io, environ: std.process.Environ, comptime config: Config) !void {
+        \\    return appicon.desktop.install(io, environ, config, &entries);
         \\}
         \\
         \\pub fn setWmIcons(
