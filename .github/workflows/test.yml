@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: marler8997/setup-anyzig@master
-      - run: zig build --summary all
+      - run: zig build --summary all install test
       # building the example generates its icons with icon_gen; running it needs a display
       - run: zig build --summary all
         working-directory: example

@@ -71,10 +71,15 @@ pub fn main(init: std.process.Init) !void {
 
         var size_iter = std.mem.splitScalar(u8, sizes_str, ',');
         while (size_iter.next()) |size_str| {
-            const target_size = std.fmt.parseInt(u16, size_str, 10) catch {
-                std.log.err("invalid size '{s}' in '{s}'", .{ size_str, sizes_str });
-                std.process.exit(1);
+            const target_size = std.fmt.parseInt(u16, size_str, 10) catch 0;
+            const max_size: u16 = switch (mode) {
+                .zig => std.math.maxInt(u16),
+                .ico => 256,
             };
+            if (target_size == 0 or target_size > max_size) {
+                std.log.err("invalid size '{s}' in '{s}' (must be 1 to {})", .{ size_str, sizes_str, max_size });
+                std.process.exit(1);
+            }
             try inputs.append(arena, .{ .decoded = decoded, .target_size = target_size });
         }
     }
@@ -112,13 +117,7 @@ fn writeZigIcons(io: std.Io, out_path: []const u8, inputs: []const IconInput) !v
         defer idat_file.close(io);
         var file_writer_buf: [4096]u8 = undefined;
         var file_writer = idat_file.writer(io, &file_writer_buf);
-
-        var compress_buf: [flate.max_window_len]u8 = undefined;
-        var compressor = flate.Compress.init(&file_writer.interface, &compress_buf, .zlib, .best) catch |err| switch (err) {
-            error.WriteFailed => return file_writer.err.?,
-        };
-        writeFilteredRows(&compressor.writer, input.decoded, input.target_size) catch return file_writer.err.?;
-        compressor.finish() catch return file_writer.err.?;
+        writeIdatZlib(&file_writer.interface, input.decoded, input.target_size) catch return file_writer.err.?;
         file_writer.interface.flush() catch return file_writer.err.?;
     }
 
@@ -164,8 +163,17 @@ fn writeZig(writer: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed
     try writer.flush();
 }
 
-/// Write PNG-filtered rows (filter byte 0 + RGBA pixels) for a box-filtered
-/// downscale of the source image.
+/// Write the zlib-compressed PNG image data (IDAT) for the source image
+/// box-filtered to `sz`. `writer` needs a buffer bigger than 8 bytes.
+pub fn writeIdatZlib(writer: *std.Io.Writer, decoded: DecodedPng, sz: u16) error{WriteFailed}!void {
+    var compress_buf: [flate.max_window_len]u8 = undefined;
+    var compressor = try flate.Compress.init(writer, &compress_buf, .zlib, .best);
+    try writeFilteredRows(&compressor.writer, decoded, sz);
+    try compressor.finish();
+}
+
+/// Write PNG-filtered rows (filter byte 0 + RGBA pixels) for the source image
+/// box-filtered to `sz`.
 fn writeFilteredRows(writer: *std.Io.Writer, decoded: DecodedPng, sz: u16) error{WriteFailed}!void {
     const src_w = decoded.width;
     const src_h = decoded.height;
@@ -185,7 +193,7 @@ fn writeFilteredRows(writer: *std.Io.Writer, decoded: DecodedPng, sz: u16) error
 
 /// Box-filter a single output pixel from the source image.
 fn boxFilter(
-    pixels: [][4]u8,
+    pixels: []const [4]u8,
     src_w: usize,
     src_h: usize,
     src_side: usize,
@@ -197,14 +205,15 @@ fn boxFilter(
 ) [4]u8 {
     const src_x0 = out_x * src_side / sz;
     const src_y0 = out_y * src_side / sz;
-    const src_x1 = (out_x + 1) * src_side / sz;
-    const src_y1 = (out_y + 1) * src_side / sz;
+    // when upscaling the range can be empty, take at least one source pixel
+    const src_x1 = @max(src_x0 + 1, (out_x + 1) * src_side / sz);
+    const src_y1 = @max(src_y0 + 1, (out_y + 1) * src_side / sz);
 
-    var r_sum: u32 = 0;
-    var g_sum: u32 = 0;
-    var b_sum: u32 = 0;
-    var a_sum: u32 = 0;
-    var count: u32 = 0;
+    var r_sum: u64 = 0;
+    var g_sum: u64 = 0;
+    var b_sum: u64 = 0;
+    var a_sum: u64 = 0;
+    var count: u64 = 0;
 
     for (src_y0..src_y1) |sy| {
         for (src_x0..src_x1) |sx| {
@@ -223,10 +232,10 @@ fn boxFilter(
     }
 
     return .{
-        if (count > 0) @intCast(r_sum / count) else 0,
-        if (count > 0) @intCast(g_sum / count) else 0,
-        if (count > 0) @intCast(b_sum / count) else 0,
-        if (count > 0) @intCast(a_sum / count) else 0,
+        @intCast(r_sum / count),
+        @intCast(g_sum / count),
+        @intCast(b_sum / count),
+        @intCast(a_sum / count),
     };
 }
 
@@ -234,27 +243,17 @@ fn boxFilter(
 fn writeIco(w: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed}!void {
     const num_entries: u16 = @intCast(inputs.len);
 
-    // Pre-calculate entry sizes and offsets.
-    const header_size: u32 = 6 + @as(u32, num_entries) * 16;
-    var entry_data_sizes: [64]u32 = undefined;
-    var offsets: [64]u32 = undefined;
-    var offset: u32 = header_size;
-    for (inputs, 0..) |input, i| {
-        const sz: u32 = input.target_size;
-        const and_mask_row: u32 = (sz + 31) / 32 * 4;
-        entry_data_sizes[i] = 40 + sz * sz * 4 + and_mask_row * sz;
-        offsets[i] = offset;
-        offset += entry_data_sizes[i];
-    }
-
     // ICONDIR
     try w.writeInt(u16, 0, .little); // reserved
     try w.writeInt(u16, 1, .little); // type: icon
     try w.writeInt(u16, num_entries, .little);
 
     // ICONDIRENTRY for each size
-    for (inputs, 0..) |input, i| {
+    var offset: u32 = 6 + @as(u32, num_entries) * 16;
+    for (inputs) |input| {
         const sz = input.target_size;
+        std.debug.assert(sz <= 256);
+        const data_size = icoEntryDataSize(sz);
         try w.writeAll(&.{
             if (sz >= 256) 0 else @as(u8, @intCast(sz)), // width
             if (sz >= 256) 0 else @as(u8, @intCast(sz)), // height
@@ -263,14 +262,15 @@ fn writeIco(w: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed}!voi
         });
         try w.writeInt(u16, 1, .little); // color planes
         try w.writeInt(u16, 32, .little); // bits per pixel
-        try w.writeInt(u32, entry_data_sizes[i], .little);
-        try w.writeInt(u32, offsets[i], .little);
+        try w.writeInt(u32, data_size, .little);
+        try w.writeInt(u32, offset, .little);
+        offset += data_size;
     }
 
     // BMP/DIB data for each size
     for (inputs) |input| {
         const sz = input.target_size;
-        const and_mask_row: u32 = (@as(u32, sz) + 31) / 32 * 4;
+        const and_mask_row = icoAndMaskRowLen(sz);
         // BITMAPINFOHEADER
         try w.writeInt(u32, 40, .little); // header size
         try w.writeInt(i32, @intCast(sz), .little); // width
@@ -278,7 +278,7 @@ fn writeIco(w: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed}!voi
         try w.writeInt(u16, 1, .little); // planes
         try w.writeInt(u16, 32, .little); // bit count
         try w.writeInt(u32, 0, .little); // compression (BI_RGB)
-        try w.writeInt(u32, @as(u32, sz) * sz * 4 + and_mask_row * sz, .little); // image size
+        try w.writeInt(u32, icoEntryDataSize(sz) - 40, .little); // image size
         try w.writeInt(i32, 0, .little); // x pixels per meter
         try w.writeInt(i32, 0, .little); // y pixels per meter
         try w.writeInt(u32, 0, .little); // colors used
@@ -290,6 +290,14 @@ fn writeIco(w: *std.Io.Writer, inputs: []const IconInput) error{WriteFailed}!voi
     }
 
     try w.flush();
+}
+
+fn icoAndMaskRowLen(sz: u16) u32 {
+    return (@as(u32, sz) + 31) / 32 * 4;
+}
+/// BITMAPINFOHEADER + BGRA pixels + AND mask
+fn icoEntryDataSize(sz: u16) u32 {
+    return 40 + @as(u32, sz) * sz * 4 + icoAndMaskRowLen(sz) * sz;
 }
 
 /// Write box-filtered, bottom-up BGRA pixel data for ICO BMP entries.
@@ -311,67 +319,73 @@ fn writeBmpPixels(w: *std.Io.Writer, decoded: DecodedPng, sz: u16) error{WriteFa
     }
 }
 
-const DecodedPng = struct {
+pub const DecodedPng = struct {
     width: usize,
     height: usize,
     pixels: [][4]u8,
 };
 
 /// Minimal PNG decoder for 8-bit RGBA non-interlaced images.
-fn decodePng(allocator: std.mem.Allocator, data: []const u8) !DecodedPng {
-    if (!std.mem.eql(u8, data[0..8], &.{ 137, 80, 78, 71, 13, 10, 26, 10 }))
+pub fn decodePng(allocator: std.mem.Allocator, data: []const u8) !DecodedPng {
+    if (data.len < 8 or !std.mem.eql(u8, data[0..8], &.{ 137, 80, 78, 71, 13, 10, 26, 10 }))
         return error.InvalidPngSignature;
 
     var pos: usize = 8;
-
-    // Read IHDR
-    pos += 4; // chunk length
-    if (!std.mem.eql(u8, data[pos..][0..4], "IHDR")) return error.ExpectedIhdr;
-    pos += 4;
-    const width: usize = std.mem.readInt(u32, data[pos..][0..4], .big);
-    pos += 4;
-    const height: usize = std.mem.readInt(u32, data[pos..][0..4], .big);
-    pos += 4;
-    const bit_depth = data[pos];
-    const color_type = data[pos + 1];
-    const interlace = data[pos + 4];
-    pos += 5 + 4; // 5 bytes (depth, color, comp, filter, interlace) + CRC
-
-    if (bit_depth != 8 or color_type != 6 or interlace != 0)
-        return error.UnsupportedPngFormat;
-
-    // Find the single IDAT chunk (error if multiple)
-    var idat_data: ?[]const u8 = null;
-    while (pos < data.len) {
+    var ihdr: ?[]const u8 = null;
+    var idat: std.ArrayList(u8) = .empty;
+    defer idat.deinit(allocator);
+    while (true) {
+        if (data.len - pos < 12) return error.TruncatedPng;
         const chunk_len: usize = std.mem.readInt(u32, data[pos..][0..4], .big);
-        const chunk_type = data[pos + 4 ..][0..4];
-        pos += 8;
-        if (std.mem.eql(u8, chunk_type, "IDAT")) {
-            if (idat_data != null) return error.MultipleIdatChunksNotSupported;
-            idat_data = data[pos..][0..chunk_len];
+        if (data.len - pos - 12 < chunk_len) return error.TruncatedPng;
+        const type_and_data = data[pos + 4 ..][0 .. 4 + chunk_len];
+        const crc = std.mem.readInt(u32, data[pos + 8 + chunk_len ..][0..4], .big);
+        if (std.hash.Crc32.hash(type_and_data) != crc) return error.BadPngChunkCrc;
+        pos += 12 + chunk_len;
+
+        const chunk_type = type_and_data[0..4];
+        const chunk_data = type_and_data[4..];
+        if (ihdr == null) {
+            if (!std.mem.eql(u8, chunk_type, "IHDR")) return error.ExpectedIhdr;
+            if (chunk_data.len != 13) return error.BadIhdrLength;
+            ihdr = chunk_data;
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            try idat.appendSlice(allocator, chunk_data);
         } else if (std.mem.eql(u8, chunk_type, "IEND")) {
             break;
         }
-        pos += chunk_len + 4; // data + CRC
     }
-    const compressed = idat_data orelse return error.NoIdatChunk;
 
-    // Skip 2-byte zlib header, decompress the raw deflate stream
-    var input_reader: std.Io.Reader = .fixed(compressed[2..]);
+    const width: usize = std.mem.readInt(u32, ihdr.?[0..4], .big);
+    const height: usize = std.mem.readInt(u32, ihdr.?[4..8], .big);
+    const bit_depth = ihdr.?[8];
+    const color_type = ihdr.?[9];
+    const interlace = ihdr.?[12];
+    if (bit_depth != 8 or color_type != 6 or interlace != 0)
+        return error.UnsupportedPngFormat;
+    if (width == 0 or height == 0) return error.EmptyPng;
+    // icon sizes are u16, and this keeps a tiny PNG from claiming gigabytes
+    if (width > std.math.maxInt(u16) or height > std.math.maxInt(u16)) return error.PngTooLarge;
+    if (idat.items.len == 0) return error.NoIdatChunk;
+
+    var input_reader: std.Io.Reader = .fixed(idat.items);
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(&input_reader, .raw, &decompress_buf);
+    var decompressor = std.compress.flate.Decompress.init(&input_reader, .zlib, &decompress_buf);
 
-    const stride = width * 4;
-    const pixels = try allocator.alloc([4]u8, width * height);
+    const stride = try std.math.mul(usize, width, 4);
+    const pixels = try allocator.alloc([4]u8, try std.math.mul(usize, width, height));
+    errdefer allocator.free(pixels);
     var cur_row = try allocator.alloc(u8, stride);
+    defer allocator.free(cur_row);
     var prev_row = try allocator.alloc(u8, stride);
+    defer allocator.free(prev_row);
     @memset(prev_row, 0);
 
     for (0..height) |y| {
         var filter_buf: [1]u8 = undefined;
-        try decompressor.reader.readSliceAll(&filter_buf);
+        decompressor.reader.readSliceAll(&filter_buf) catch return decompressor.err orelse error.TruncatedPngData;
         const filter_type = filter_buf[0];
-        try decompressor.reader.readSliceAll(cur_row);
+        decompressor.reader.readSliceAll(cur_row) catch return decompressor.err orelse error.TruncatedPngData;
 
         for (0..stride) |i| {
             const a: u8 = if (i >= 4) cur_row[i - 4] else 0;
@@ -389,12 +403,7 @@ fn decodePng(allocator: std.mem.Allocator, data: []const u8) !DecodedPng {
         }
 
         for (0..width) |x| {
-            pixels[y * width + x] = .{
-                cur_row[x * 4 + 0],
-                cur_row[x * 4 + 1],
-                cur_row[x * 4 + 2],
-                cur_row[x * 4 + 3],
-            };
+            pixels[y * width + x] = cur_row[x * 4 ..][0..4].*;
         }
 
         const tmp = prev_row;
@@ -413,4 +422,107 @@ fn paethPredictor(a: u8, b: u8, c: u8) u8 {
     if (pa <= pb and pa <= pc) return a;
     if (pb <= pc) return b;
     return c;
+}
+
+test "decodePng: all row filters and several IDAT chunks" {
+    // made by ImageMagick (libpng picks all 5 row filters) with its IDAT
+    // split into 3 chunks; filters.rgba is the image ImageMagick decodes from it
+    const png = @embedFile("testdata/filters.png");
+    const expected = @embedFile("testdata/filters.rgba");
+    const decoded = try decodePng(std.testing.allocator, png);
+    defer std.testing.allocator.free(decoded.pixels);
+    try std.testing.expectEqual(48, decoded.width);
+    try std.testing.expectEqual(48, decoded.height);
+    try std.testing.expectEqualSlices(u8, expected, std.mem.sliceAsBytes(decoded.pixels));
+}
+
+test "decodePng: truncated or corrupt input" {
+    const png = @embedFile("testdata/filters.png");
+    for ([_]usize{ 0, 7, 8, 20, 33, 100, png.len - 13, png.len - 1 }) |len| {
+        if (decodePng(std.testing.allocator, png[0..len])) |d| {
+            std.testing.allocator.free(d.pixels);
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+    var corrupt = png.*;
+    corrupt[200] ^= 1;
+    try std.testing.expectError(error.BadPngChunkCrc, decodePng(std.testing.allocator, &corrupt));
+
+    // IHDR claiming 65536 x 1, with a valid CRC
+    var huge = png.*;
+    std.mem.writeInt(u32, huge[16..20], 65536, .big);
+    std.mem.writeInt(u32, huge[20..24], 1, .big);
+    std.mem.writeInt(u32, huge[29..33], std.hash.Crc32.hash(huge[12..29]), .big);
+    try std.testing.expectError(error.PngTooLarge, decodePng(std.testing.allocator, &huge));
+}
+
+fn testFilter(pixels: []const [4]u8, w: usize, h: usize, sz: u16) ![]const [4]u8 {
+    const out = try std.testing.allocator.alloc([4]u8, @as(usize, sz) * sz);
+    const side = @max(w, h);
+    for (0..sz) |y| for (0..sz) |x| {
+        out[y * sz + x] = boxFilter(pixels, w, h, side, (side - w) / 2, (side - h) / 2, x, y, sz);
+    };
+    return out;
+}
+
+test "boxFilter: non-square source is centered on a transparent square" {
+    // 2 wide x 4 high: padded to 4x4 with one transparent column on each side
+    const src = [_][4]u8{
+        .{ 40, 0, 0, 200 },  .{ 0, 80, 0, 100 },
+        .{ 40, 0, 0, 200 },  .{ 0, 80, 0, 100 },
+        .{ 0, 0, 120, 255 }, .{ 0, 0, 0, 0 },
+        .{ 0, 0, 120, 255 }, .{ 0, 0, 0, 0 },
+    };
+    const out = try testFilter(&src, 2, 4, 2);
+    defer std.testing.allocator.free(out);
+    // each output pixel averages a 2x2 block: one padding column, one image column
+    try std.testing.expectEqualSlices([4]u8, &.{
+        .{ 20, 0, 0, 100 }, .{ 0, 40, 0, 50 },
+        .{ 0, 0, 60, 127 }, .{ 0, 0, 0, 0 },
+    }, out);
+}
+
+test "boxFilter: upscale repeats source pixels" {
+    const src = [_][4]u8{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 }, .{ 13, 14, 15, 16 } };
+    const out = try testFilter(&src, 2, 2, 4);
+    defer std.testing.allocator.free(out);
+    const a = src[0];
+    const b = src[1];
+    const c = src[2];
+    const d = src[3];
+    try std.testing.expectEqualSlices([4]u8, &.{
+        a, a, b, b,
+        a, a, b, b,
+        c, c, d, d,
+        c, c, d, d,
+    }, out);
+}
+
+test "writeIco layout" {
+    var pixels = [_][4]u8{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 }, .{ 13, 14, 15, 16 } };
+    const decoded: DecodedPng = .{ .width = 2, .height = 2, .pixels = &pixels };
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeIco(&w, &.{ .{ .decoded = decoded, .target_size = 1 }, .{ .decoded = decoded, .target_size = 2 } });
+    const ico = w.buffered();
+
+    // 6 header + 2*16 entries, then 40 + 1*1*4 + 4 and-mask, then 40 + 2*2*4 + 2*4 and-mask
+    try std.testing.expectEqual(6 + 32 + 48 + 64, ico.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 1, 0, 2, 0 }, ico[0..6]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 0, 0, 1, 0, 32, 0, 48, 0, 0, 0, 38, 0, 0, 0 }, ico[6..22]);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 2, 0, 0, 1, 0, 32, 0, 64, 0, 0, 0, 86, 0, 0, 0 }, ico[22..38]);
+
+    const read = std.mem.readInt;
+    // first entry: 1x1 averages all four pixels (BGRA)
+    try std.testing.expectEqual(40, read(u32, ico[38..42], .little));
+    try std.testing.expectEqual(1, read(i32, ico[42..46], .little));
+    try std.testing.expectEqual(2, read(i32, ico[46..50], .little));
+    try std.testing.expectEqual(8, read(u32, ico[58..62], .little));
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 10, 0, 0, 0, 0 }, ico[78..86]);
+    // second entry: bottom-up rows, BGRA
+    try std.testing.expectEqual(2, read(i32, ico[90..94], .little));
+    try std.testing.expectEqual(4, read(i32, ico[94..98], .little));
+    try std.testing.expectEqual(24, read(u32, ico[106..110], .little));
+    try std.testing.expectEqualSlices(u8, &.{ 11, 10, 9, 12, 15, 14, 13, 16, 3, 2, 1, 4, 7, 6, 5, 8 }, ico[126..142]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }, ico[142..150]);
 }
